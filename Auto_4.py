@@ -5,8 +5,26 @@ from datetime import datetime
 from openpyxl import load_workbook
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes, CallbackQueryHandler
+from flask import Flask
+from threading import Thread
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN FLASK PARA RENDER ---
+server = Flask('')
+
+@server.route('/')
+def home():
+    return "Bot de Ventas en línea"
+
+def run():
+    # Render expone el puerto a través de una variable de entorno PORT
+    port = int(os.environ.get('PORT', 8080))
+    server.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# --- CONFIGURACIÓN BOT Y EXCEL ---
 TOKEN = '8354510389:AAF1_OveG63b9vzW4Ir3nght6dqY0HHg5VE'
 EXCEL_PATH = 'datos_clientes.xlsx'
 os.makedirs('fotos', exist_ok=True)
@@ -86,6 +104,35 @@ async def validar_rif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 No registrado. Envíe **Foto del RIF**:")
     return REGISTRO_FOTO_RIF
 
+# --- FUNCIONES AÑADIDAS PARA CONVERSATION HANDLER ---
+async def guardar_foto_rif(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Lógica placeholder: guarda la foto y pide el siguiente dato
+    photo_file = await update.message.photo[-1].get_file()
+    path = os.path.join('fotos', f"{context.user_data['Rif']}_rif.jpg")
+    await photo_file.download_to_drive(path)
+    context.user_data['Foto Rif'] = path
+    await update.message.reply_text("Foto del RIF guardada. Ingrese Razón Social:")
+    context.user_data['campo_actual'] = 0 # Usamos un índice para CAMPOS_REGISTRO
+    return PREGUNTANDO_DATOS
+
+async def registro_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Lógica placeholder: guarda datos de registro
+    campo = CAMPOS_REGISTRO[context.user_data['campo_actual']]
+    context.user_data[campo] = update.message.text
+    
+    if context.user_data['campo_actual'] < len(CAMPOS_REGISTRO) - 1:
+        context.user_data['campo_actual'] += 1
+        siguiente_campo = CAMPOS_REGISTRO[context.user_data['campo_actual']]
+        await update.message.reply_text(f"Ingrese {siguiente_campo}:")
+        return PREGUNTANDO_DATOS
+    else:
+        guardar_cliente_excel(context.user_data)
+        await update.message.reply_text("✅ Registro completado. Proceda con el pedido.")
+        await mostrar_menu_productos(update, context, pagina=0)
+        return ESPERANDO_UNIDADES
+# --- FIN FUNCIONES AÑADIDAS ---
+
+
 async def mostrar_menu_productos(update: Update, context: ContextTypes.DEFAULT_TYPE, pagina: int = 0):
     df_prod = pd.read_excel(EXCEL_PATH, sheet_name='Productos', engine='openpyxl')
     items_por_pagina = 10
@@ -160,58 +207,32 @@ async def finalizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("pag_"):
         await mostrar_menu_productos(update, context, 0)
         return ESPERANDO_UNIDADES
-    await query.edit_message_text(f"🏁 Orden #{context.user_data['Orden']} cerrada. ¡Gracias!")
+    await query.edit_message_text(f"🏁 Orden #{context.user_data['Orden']} finalizada. ¡Gracias!")
+    context.user_data.clear() # Limpia los datos de usuario al finalizar
     return ConversationHandler.END
 
-# --- REGISTRO ---
-async def recibir_foto_rif(update, context):
-    foto = await update.message.photo[-1].get_file()
-    ruta = f"fotos/rif_{context.user_data['Rif']}.jpg"
-    await foto.download_to_drive(ruta)
-    context.user_data.update({'Foto Rif': ruta, 'indice_pregunta': 0})
-    await update.message.reply_text(f"📝 Ingrese la Razón Social:")
-    return PREGUNTANDO_DATOS
 
-async def flujo_preguntas(update, context):
-    idx = context.user_data['indice_pregunta']
-    campo = CAMPOS_REGISTRO[idx]
-    if "Foto" in campo or "Referencia" in campo:
-        if not update.message.photo: return PREGUNTANDO_DATOS
-        file = await update.message.photo[-1].get_file()
-        path = f"fotos/{campo.replace(' ','_').lower()}_{context.user_data['Rif']}.jpg"
-        await file.download_to_drive(path)
-        context.user_data[campo] = path
-    else: context.user_data[campo] = update.message.text
-
-    idx += 1
-    context.user_data['indice_pregunta'] = idx
-    if idx < len(CAMPOS_REGISTRO):
-        sig = CAMPOS_REGISTRO[idx]
-        await update.message.reply_text(f"{'📸 Foto' if 'Referencia' in sig or 'Foto' in sig else '📝 Ingrese'}: {sig}")
-        return PREGUNTANDO_DATOS
-    
-    guardar_cliente_excel(context.user_data)
-    context.user_data['Razon Social'] = context.user_data.get('Razón Social')
-    await update.message.reply_text("✅ Registro completado.")
-    await mostrar_menu_productos(update, context, 0)
-    return ESPERANDO_UNIDADES
+# --- MAIN FUNCTION CON FLASK KEEP_ALIVE ---
 
 def main():
+    keep_alive() # Esto inicia el servidor web para que Render no lo apague
     app = Application.builder().token(TOKEN).connect_timeout(90).read_timeout(90).build()
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
         states={
-            ESPERANDO_RIF: [MessageHandler(filters.TEXT & ~filters.COMMAND, validar_rif)],
-            REGISTRO_FOTO_RIF: [MessageHandler(filters.PHOTO, recibir_foto_rif)],
-            PREGUNTANDO_DATOS: [MessageHandler(filters.PHOTO | filters.TEXT, flujo_preguntas)],
-            ESPERANDO_UNIDADES: [CallbackQueryHandler(seleccion_producto), MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_unidades)],
-            CONTINUAR_O_FINALIZAR: [CallbackQueryHandler(finalizar)]
+            ESPERANDO_RIF:,
+            REGISTRO_FOTO_RIF: [MessageHandler(filters.PHOTO & ~filters.COMMAND, guardar_foto_rif)],
+            PREGUNTANDO_DATOS:,
+            ESPERANDO_UNIDADES:,
+            CONTINUAR_O_FINALIZAR: [CallbackQueryHandler(finalizar)],
         },
-        fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)],
-        per_message=False
+        fallbacks=[CommandHandler('start', start)]
     )
-    app.add_handler(conv)
-    print("Bot activo: Subtotal por orden y paginación de 10 configurados.")
+
+    app.add_handler(conv_handler)
+    
+    # Inicia el bot en modo polling 
     app.run_polling()
 
 if __name__ == '__main__':
