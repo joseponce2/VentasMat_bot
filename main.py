@@ -3,7 +3,7 @@ import gspread
 import logging
 import json
 import asyncio
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -13,27 +13,28 @@ logger = logging.getLogger(__name__)
 
 # Configuración de Flask
 app = Flask(__name__)
-# ASEGÚRATE de tener la variable de entorno TELEGRAM_TOKEN en Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     logger.error("ERROR: No se encontró la variable de entorno TELEGRAM_TOKEN")
+    # Si no hay token, la app no puede iniciar correctamente
+    exit(1) 
 
-# 2. Configuración de Google Sheets (Asumimos que el secret file y APIs están OK)
+# 2. Configuración de Google Sheets (Usando método moderno)
 sheet = None
 try:
-    with open('google_creds.json') as f:
+    with open('google_creds.json', 'r') as f:
         creds_json = json.load(f)
-    # Importamos aquí ServiceAccountCredentials para evitar errores de importación circular previos
-    from oauth2client.service_account import ServiceAccountCredentials
-    scope = ["https://spreadsheets.google.com", "https://www.googleapis.com"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
-    client = gspread.authorize(creds)
+    
+    # Nuevo método: usar from_service_account_info directamente con el diccionario
+    client = gspread.service_account_from_dict(creds_json)
+    
     sheet = client.open("Ventas_Bot_Datos").get_worksheet(0)
     logger.info("Conexión exitosa a Google Sheets")
 except Exception as e:
     logger.error(f"Error conectando a Google Sheets: {e}")
+    # Si Sheets falla, el bot aún puede iniciar, pero las funciones fallarán.
 
-# 3. Funciones del Bot (Ahora deben ser async)
+# 3. Funciones del Bot (Async)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("¡Hola! Soy tu bot de ventas. Usa /registrar para anotar una venta.")
 
@@ -47,17 +48,15 @@ async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("Uso: /registrar [Producto] [Precio]")
             return
         
-        # Unimos los argumentos en una sola lista para append_row
         datos = list(context.args)
         
-        # Insertar en la siguiente fila vacía de Google Sheets
         sheet.append_row(datos)
-        await update.message.reply_text(f"✅ Registrado: {datos[0]} a ${datos[1]}")
+        await update.message.reply_text(f"✅ Registrado: {context.args} en la hoja.")
     except Exception as e:
         logger.error(f"Error al registrar: {e}")
         await update.message.reply_text(f"❌ Error al registrar: {e}")
 
-# 4. Configuración de Webhooks con Application
+# 4. Configuración de Webhooks y la aplicación
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("registrar", registrar))
@@ -77,14 +76,15 @@ def health_check():
 
 # 5. Ejecución Principal
 if __name__ == '__main__':
-    # Configurar el webhook al iniciar la app
-    # Render asigna dinámicamente el dominio, pero usamos la URL principal
-    WEBHOOK_URL = f"https://ventasmat-bot-1.onrender.com{TELEGRAM_TOKEN}"
-    # Configuramos el webhook usando asyncio para compatibilidad con PTB v22+
-    asyncio.run(bot.set_webhook(WEBHOOK_URL))
-    logger.info(f"Webhook configurado en: {WEBHOOK_URL}")
-
-    # Iniciar Flask (Render usará esta parte para mantener el servicio vivo)
+    # Usamos application.run_webhook para manejar todo el setup de Render correctamente
+    # Render espera que el puerto 10000 responda HTTP.
     port = int(os.environ.get("PORT", 10000))
-    # Usamos '0.0.0.0' para que sea accesible externamente en Render
-    app.run(host='0.0.0.0', port=port, debug=False)
+    WEBHOOK_URL = f"https://ventasmat-bot-1.onrender.com"
+    
+    # Inicia el servidor Flask y configura el webhook en Telegram
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=f"/{TELEGRAM_TOKEN}",
+        webhook_url=WEBHOOK_URL + TELEGRAM_TOKEN
+    )
